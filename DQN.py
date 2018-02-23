@@ -378,7 +378,7 @@ def parse_arguments():
     parser.add_argument('--env', dest='env', type=str, default='CartPole-v0')
     parser.add_argument('--save_interval', type=int, default=50, help='save model every n episodes')
     parser.add_argument('--log_interval', type=int, default=10, help='logging every n episodes')
-    parser.add_argument('--render', help='render', type=int, default=0)
+    parser.add_argument('--render', help='render', type=int, default=1)
     parser.add_argument('--batch_size', help='batch_size', type=int, default=32)
     parser.add_argument('--train_freq', help='train_frequency', type=int, default=1)
     parser.add_argument('--max_episode', help='maximum episode', type=int, default=None)
@@ -407,13 +407,16 @@ def set_random_seed(seed):
 def wrap_env(env, args):
     monitor_dir = os.path.join(args.save_dir, 'monitor')
     os.makedirs(monitor_dir, exist_ok=True)
-    if args.max_episode is not None:
-        video_save_interval = int(args.max_episode / 3)
+    if args.render:
+        if args.max_episode is not None:
+            video_save_interval = int(args.max_episode / 3)
+        else:
+            video_save_interval = int(args.max_timesteps / env._max_episode_steps / 3)
+        env = Monitor(env, directory=monitor_dir,
+                      video_callable=lambda episode_id: episode_id % video_save_interval == 0,
+                      force=True)
     else:
-        video_save_interval = int(args.max_timesteps / env._max_episode_steps / 3)
-    env = Monitor(env, directory=monitor_dir,
-                  video_callable=lambda episode_id: episode_id % video_save_interval == 0,
-                  force=True)
+        env = Monitor(env, directory=monitor_dir, video_callable=False, force=True)
     return env
 
 def main(args):
