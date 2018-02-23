@@ -159,6 +159,7 @@ class DQNAgent:
 
         episode_loss = []
         episode_num = 0
+        episode_num_inc = False
         episode_step = 0
         episode_reward = 0.0
         episode_rewards = deque(maxlen=50)
@@ -179,6 +180,7 @@ class DQNAgent:
                 episode_steps.append(episode_step)
                 episode_loss = []
                 episode_num += 1
+                episode_num_inc = True
                 episode_step = 0
                 episode_reward = 0
             else:
@@ -192,7 +194,7 @@ class DQNAgent:
                         self.scheduler.step()
                 self.update_target_network(t)
 
-                if episode_num % self.log_interval == 0:
+                if episode_num % self.log_interval == 0 and episode_num_inc:
                     log_info = {}
                     log_info['steps'] = t
                     log_info['episode'] = episode_num
@@ -203,7 +205,7 @@ class DQNAgent:
                     log_info['epsilon'] = self.epsilon
                     self.nice_log(log_info, step=t)
 
-                if episode_num % self.save_interval == 0:
+                if episode_num % self.save_interval == 0 and episode_num_inc:
                     log_info = {}
                     eval_reward = self.eval_q_net()
                     log_info['eval/reward'] = eval_reward
@@ -214,6 +216,7 @@ class DQNAgent:
                         is_best = True
                     self.save_model(is_best=is_best, step=t)
                     self.log_model_weights(t)
+                episode_num_inc = False
 
             if self.max_episode is not None and episode_num >= self.max_episode:
                 break
@@ -407,7 +410,7 @@ def wrap_env(env, args):
     if args.max_episode is not None:
         video_save_interval = int(args.max_episode / 3)
     else:
-        video_save_interval = int(args.max_timesteps / env._max_episode_steps)
+        video_save_interval = int(args.max_timesteps / env._max_episode_steps / 3)
     env = Monitor(env, directory=monitor_dir,
                   video_callable=lambda episode_id: episode_id % video_save_interval == 0,
                   force=True)
