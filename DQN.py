@@ -214,7 +214,6 @@ class DQNAgent:
                         is_best = True
                     self.save_model(is_best=is_best, step=t)
                     self.log_model_weights(t)
-                    ob = self.env.reset()
 
             if self.max_episode is not None and episode_num >= self.max_episode:
                 break
