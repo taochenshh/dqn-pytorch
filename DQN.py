@@ -228,7 +228,7 @@ class DQNAgent:
 
     def train(self):
         self.q_net.train()
-        episode_loss = []
+        net_loss = deque(maxlen=50)
         episode_num = 0
         episode_num_inc = False
         episode_step = 0
@@ -249,7 +249,6 @@ class DQNAgent:
                 ob = self.env.reset()
                 episode_rewards.append(episode_reward)
                 episode_steps.append(episode_step)
-                episode_loss = []
                 episode_num += 1
                 episode_num_inc = True
                 episode_step = 0
@@ -260,7 +259,7 @@ class DQNAgent:
             if len(self.memory) > self.warmup_mem:
                 if t % self.train_freq == 0:
                     loss = self.train_q_net()
-                    episode_loss.append(loss)
+                    net_loss.append(loss)
                     if self.lr_decay:
                         self.scheduler.step()
                 self.update_target_network(t)
@@ -270,7 +269,7 @@ class DQNAgent:
                 log_info['steps'] = t
                 log_info['episode'] = episode_num
                 if len(self.memory) > self.warmup_mem:
-                    log_info['episode_loss'] = np.mean(episode_loss)
+                    log_info['episode_loss'] = np.mean([lo for lo in net_loss])
                     log_info['lr'] = self.optimizer.param_groups[0]['lr']
                 log_info['episode_reward'] = np.mean([rew for rew in episode_rewards])
                 log_info['episode_step'] = np.mean([sp for sp in episode_steps])
