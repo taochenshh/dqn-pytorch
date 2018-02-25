@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch import optim
 from tensorboardX import SummaryWriter
 import numpy as np
-
+from PIL import Image
 from collections import deque
 import os, sys, copy, argparse, shutil
 from datetime import datetime
@@ -38,36 +38,96 @@ def print_cyan(skk):
     print("\033[96m {}\033[00m" .format(skk))
 
 class DQNetworkFC(nn.Module):
-    def __init__(self, ob_space, act_space):
+    def __init__(self, in_channels, act_space, dueling):
         super(DQNetworkFC, self).__init__()
-        ob_dim = ob_space.shape[0]
-        act_dim = act_space.n
+        self.act_dim = act_space.n
         hid_dim = 64
-        self.fc1 = nn.Linear(ob_dim, hid_dim)
-        self.fc2 = nn.Linear(hid_dim, act_dim)
+        self.dueling = dueling
+        self.fc1 = nn.Linear(in_channels, hid_dim)
+        if self.dueling:
+            self.v_fc = nn.Linear(hid_dim, self.act_dim)
+            self.adv_fc = nn.Linear(hid_dim, 1)
+        else:
+            self.fc2 = nn.Linear(hid_dim, self.act_dim)
 
     def forward(self, st):
-        out = F.selu(self.fc1(st))
-        out = self.fc2(out)
+        out = F.relu(self.fc1(st))
+        if self.dueling:
+            val = self.v_fc(out).expand(out.size(0), self.act_dim)
+            adv = self.adv_fc(out)
+            out = val + adv - adv.mean(1).unsqueeze(1).expand(out.size(0), self.act_dim)
+        else:
+            out = self.fc2(out)
         return out
+
+
+class DQNetworkConv(nn.Module):
+    def __init__(self, in_channels, act_space, dueling):
+        super(DQNetworkConv, self).__init__()
+        self.act_dim = act_space.n
+        self.dueling = dueling
+
+        self.conv1 = nn.Conv2d(in_channels, 32, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
+        if self.dueling:
+            self.v_fc4 = nn.Linear(7 * 7 * 64, 512)
+            self.adv_fc4 = nn.Linear(7 * 7 * 64, 512)
+            self.v_fc5 = nn.Linear(512, 1)
+            self.adv_fc5 = nn.Linear(512, self.act_dim)
+        else:
+            self.fc4 = nn.Linear(7 * 7 * 64, 512)
+            self.fc5 = nn.Linear(512, self.act_dim)
+
+    def forward(self, st):
+        out = F.relu(self.conv1(st))
+        out = F.relu(self.conv2(out))
+        out = F.relu(self.conv3(out))
+        out = out.view(out.size(0), -1)
+        if self.dueling:
+            val = F.relu(self.v_fc4(out))
+            adv = F.relu(self.adv_fc4(out))
+            val = self.v_fc5(val)
+            adv = self.adv_fc5(adv)
+            out = val + adv - adv.mean(1).unsqueeze(1).expand(out.size(0), self.act_dim)
+        else:
+            out = F.relu(self.fc4(out))
+            out = self.fc5(out)
+        return out
+
 
 class CyclicBuffer:
     def __init__(self, shape, dtype='float32'):
         self.cur_pos = 0
         self.cur_len = 0
         self.buffer_size = shape[0]
-        self.data = np.zeros(shape).astype(dtype)
+        self.data_split = True if len(shape) > 3 else False # split data into several smaller array to avoid memory error
+        if self.data_split:
+            self.data = [np.zeros((shape[0],) + (shape[2:])) for i in range(shape[1])]
+        else:
+            self.data = np.zeros(shape).astype(dtype)
 
     def __len__(self):
         return self.cur_len
 
     def get_batch(self, ids):
-        return self.data[ids]
+        if self.data_split:
+            data = []
+            for i in range(len(self.data)):
+                data.append(self.data[i][ids])
+            data = np.stack(data, axis=1)
+        else:
+            data = self.data[ids]
+        return data
 
     def append(self, v):
         if self.cur_len < self.buffer_size:
             self.cur_len += 1
-        self.data[self.cur_pos] = v
+        if self.data_split:
+            for i in range(len(self.data)):
+                self.data[i][self.cur_pos] = v[i, :, :]
+        else:
+            self.data[self.cur_pos] = v
         self.cur_pos = (self.cur_pos + 1) % self.buffer_size
 
 
@@ -131,6 +191,8 @@ class DQNAgent:
         self.save_interval = args.save_interval
         self.max_episode = args.max_episode
         self.max_timesteps = args.max_timesteps
+        self.enable_double_q = args.double_q
+        self.enable_dueling_net = args.dueling_net
 
         self.save_dir = args.save_dir
         self.model_dir = os.path.join(self.save_dir, 'model')
@@ -139,24 +201,33 @@ class DQNAgent:
         os.makedirs(self.model_dir, exist_ok=True)
 
         self.best_eval_reward = -np.inf
-        self.q_net = qnet(ob_space=self.ob_space, act_space=self.ac_space)
+        self.q_net = qnet(in_channels=self.ob_space.shape[0],
+                          act_space=self.ac_space,
+                          dueling=self.enable_dueling_net)
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=self.lr)
         self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.998, last_epoch=-1)
-        self.target_q_net = qnet(ob_space=self.ob_space, act_space=self.ac_space)
-        self.hard_update(self.target_q_net, self.q_net)
-
-        self.memory = ReplayMemory(capacity=int(args.memory),
-                                   observation_shape=self.ob_space.shape)
-
-        self.q_net_loss = nn.SmoothL1Loss()
         self.q_net.cuda()
-        self.target_q_net.cuda()
-        self.q_net_loss.cuda()
-        log_dir = os.path.join(self.log_dir, datetime.now().strftime('%b%d_%H-%M-%S'))
-        self.summary_writer = SummaryWriter(log_dir=log_dir)
+
+        if args.test:
+            self.load_model(step=args.resume_step)
+        else:
+            self.target_q_net = qnet(in_channels=self.ob_space.shape[0],
+                                     act_space=self.ac_space,
+                                     dueling=self.enable_dueling_net)
+            self.hard_update(self.target_q_net, self.q_net)
+
+            self.memory = ReplayMemory(capacity=int(args.memory),
+                                       observation_shape=self.ob_space.shape)
+
+            self.q_net_loss = nn.SmoothL1Loss()
+            self.target_q_net.cuda()
+            self.q_net_loss.cuda()
+            log_dir = os.path.join(self.log_dir, datetime.now().strftime('%b%d_%H-%M-%S'))
+            self.summary_writer = SummaryWriter(log_dir=log_dir)
+            self.target_q_net.eval()
 
     def train(self):
-
+        self.q_net.train()
         episode_loss = []
         episode_num = 0
         episode_num_inc = False
@@ -194,40 +265,70 @@ class DQNAgent:
                         self.scheduler.step()
                 self.update_target_network(t)
 
-                if episode_num % self.log_interval == 0 and episode_num_inc:
-                    log_info = {}
-                    log_info['steps'] = t
-                    log_info['episode'] = episode_num
+            if episode_num % self.log_interval == 0 and episode_num_inc:
+                log_info = {}
+                log_info['steps'] = t
+                log_info['episode'] = episode_num
+                if len(self.memory) > self.warmup_mem:
                     log_info['episode_loss'] = np.mean(episode_loss)
-                    log_info['episode_reward'] = np.mean([rew for rew in episode_rewards])
-                    log_info['episode_step'] = np.mean([sp for sp in episode_steps])
                     log_info['lr'] = self.optimizer.param_groups[0]['lr']
-                    log_info['epsilon'] = self.epsilon
-                    self.nice_log(log_info, step=t)
+                log_info['episode_reward'] = np.mean([rew for rew in episode_rewards])
+                log_info['episode_step'] = np.mean([sp for sp in episode_steps])
+                log_info['epsilon'] = self.epsilon
+                self.nice_log(log_info, step=t)
 
-                if episode_num % self.save_interval == 0 and episode_num_inc:
-                    log_info = {}
-                    eval_reward = self.eval_q_net()
-                    log_info['eval/reward'] = eval_reward
-                    self.nice_log(log_info, step=t)
-                    is_best = False
-                    if eval_reward > self.best_eval_reward:
-                        self.best_eval_reward = eval_reward
-                        is_best = True
-                    self.save_model(is_best=is_best, step=t)
-                    self.log_model_weights(t)
-                episode_num_inc = False
+            if len(self.memory) > self.warmup_mem and episode_num % self.save_interval == 0 and episode_num_inc:
+                log_info = {}
+                eval_reward = self.eval_q_net()
+                log_info['eval/reward'] = eval_reward
+                self.nice_log(log_info, step=t)
+                is_best = False
+                if eval_reward > self.best_eval_reward:
+                    self.best_eval_reward = eval_reward
+                    is_best = True
+                self.save_model(is_best=is_best, step=t)
+                self.log_model_weights(t)
+            episode_num_inc = False
+
 
             if self.max_episode is not None and episode_num >= self.max_episode:
                 break
         print_blue('Training done ...')
 
     def get_q_values(self, ob):
-        ob = Variable(torch.from_numpy(ob)).float().cuda().view(1, -1)
+        ob = Variable(torch.from_numpy(np.expand_dims(ob, axis=0))).float().cuda()
         q_val = self.q_net(ob)
         return q_val
 
+    def rollout(self, episodes, render=False):
+        self.q_net.eval()
+        rewards = []
+        ob = self.env.reset()
+        for ep in range(episodes):
+            reward = 0
+            episode_step = 0
+            while True:
+                q_val = self.get_q_values(ob)
+                act = self.greedy_policy(q_val)
+                new_ob, rew, done, _ = self.env.step(act)
+                if render:
+                    self.env.render()
+                episode_step += 1
+                reward += rew
+                ob = new_ob
+                if done:
+                    ob = self.env.reset()
+                    rewards.append(reward)
+                    break
+        self.q_net.train()
+        reward_mean = np.mean(rewards)
+        reward_std = np.std(rewards)
+        print('Reward mean: {:.3f}  Reward std: {:.5f}'.format(reward_mean, reward_std))
+        return reward_mean, reward_std
+
+
     def eval_q_net(self):
+        self.q_net.eval()
         ori_epsilon = self.epsilon
         self.epsilon = 0.05
         rewards = []
@@ -247,7 +348,9 @@ class DQNAgent:
                     rewards.append(reward)
                     break
         self.epsilon = ori_epsilon
+        self.q_net.train()
         return np.mean(rewards)
+
 
     def decay_epsilon(self, step):
         frac = min(float(step) / self.max_epsilon_decay_steps, 1.0)
@@ -273,7 +376,12 @@ class DQNAgent:
         action_q_vals = torch.gather(q_vals, 1, actions)
 
         target_net_q_vals = self.target_q_net(vol_obs1)
-        target_action_q_vals, _ = torch.max(target_net_q_vals, 1)
+        if self.enable_double_q:
+            cur_net_q_vals = self.q_net(vol_obs1)
+            _, act_max = torch.max(cur_net_q_vals, 1)
+            target_action_q_vals = torch.gather(target_net_q_vals, 1, act_max.view(-1, 1))
+        else:
+            target_action_q_vals, _ = torch.max(target_net_q_vals, 1)
         target_action_q_vals.volatile = False
         target_action_q_vals = target_action_q_vals.view(-1, 1)
         q_label = rewards + self.gamma * target_action_q_vals * (1 - terminals)
@@ -305,6 +413,22 @@ class DQNAgent:
     def log_model_weights(self, step):
         for name, param in self.q_net.named_parameters():
             self.summary_writer.add_histogram(name, param.clone().cpu().data.numpy(), step)
+
+    def load_model(self, step=None):
+        if step is None:
+            ckpt_file = os.path.join(self.model_dir, 'model_best.pth')
+        else:
+            ckpt_file = os.path.join(self.model_dir,
+                                     'ckpt_{:010d}.pth'.format(step))
+        if not os.path.isfile(ckpt_file):
+            raise ValueError("No checkpoint found at '{}'".format(ckpt_file))
+        print_yellow('Loading checkpoint {}'.format(ckpt_file))
+        checkpoint = torch.load(ckpt_file)
+        if step is None:
+            print_yellow('Checkpoint step: {}'.format(checkpoint['ckpt_step']))
+        self.q_net.load_state_dict(checkpoint['state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
+        print_yellow('Checkpoint loaded...')
 
     def save_model(self, is_best, step):
         ckpt_file = os.path.join(self.model_dir,
@@ -371,6 +495,51 @@ class DQNAgent:
         # Flush the output to the file
         sys.stdout.flush()
 
+class WrapAtariEnv(gym.Wrapper):
+    def __init__(self, env, noop_max=30, frameskip=4, framestack=4):
+        gym.Wrapper.__init__(self, env)
+        self.noop_max = noop_max
+        self.frameskip = frameskip
+        self.framestack = framestack
+        self.frames = deque(maxlen=self.framestack)
+
+        self.observation_space = gym.spaces.Box(low=0, high=1.0,
+                                                shape=(self.framestack, 84, 84))
+        self._max_episode_steps = env._max_episode_steps
+
+    def reset(self):
+        self.env.reset()
+        noops = np.random.randint(1, self.noop_max + 1)
+        for i in range(noops):
+            ob, rew, done, info = self.env.step(0) # execute the action 0
+            if done:
+                ob = self.reset()
+        ob = self.process_ob(ob)
+        for i in range(self.framestack):
+            self.frames.append(ob)
+        return self.get_ob()
+
+    def step(self, action):
+        total_rew = 0.
+        for i in range(self.frameskip):
+            ob, rew, done, info = self.env.step(action)
+            total_rew += rew
+        total_rew = np.sign(total_rew)  # convert reward to {+1, -1, 0}
+        ob = self.process_ob(ob)
+        self.frames.append(ob)
+        return self.get_ob(), total_rew, done, info
+
+    def get_ob(self):
+        ob = np.stack(list(self.frames), axis=0)
+        return ob
+
+    def process_ob(self, ob):
+        im = Image.fromarray(ob)
+        im = im.convert('L')
+        im = im.resize((84, 84), Image.LANCZOS)
+        ob = np.array(im).astype(np.float32) / 255.0
+        return ob
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Deep Q Network Argument Parser')
@@ -387,15 +556,21 @@ def parse_arguments():
     parser.add_argument('--lr_decay', action='store_true', help='decay learning rate')
     parser.add_argument('--gamma', help='discount_factor', type=float, default=0.99)
     parser.add_argument('--warmup_mem', type=int, help='warmup memory size', default=1000)
+    parser.add_argument('--frame_skip', type=int, help='number of frames to skip for each action', default=3)
+    parser.add_argument('--frame_stack', type=int, help='number of frames to stack', default=4)
     parser.add_argument('--memory', help='memory size', type=int, default=1000000)
     parser.add_argument('--initial_epsilon', '-ie', help='initial_epsilon', type=float, default=0.5)
     parser.add_argument('--final_epsilon', '-fe', help='final_epsilon', type=float, default=0.05)
     parser.add_argument('--max_epsilon_decay_steps', '-eds', help='maximum steps to decay epsilon', type=int, default=100000)
     parser.add_argument('--max_grad_norm', type=float, default=None, help='maximum gradient norm')
     parser.add_argument('--soft_update', '-su', action='store_true', help='soft update target network')
+    parser.add_argument('--double_q', '-dq', action='store_true', help='enabling double DQN')
+    parser.add_argument('--dueling_net', '-dn', action='store_true', help='enabling dueling network')
+    parser.add_argument('--test', action='store_true', help='test the trained model')
     parser.add_argument('--tau', type=float, default=0.01, help='tau for soft target network update')
     parser.add_argument('--hard_update_freq', '-huf', type=int, default=500, help='hard target network update frequency')
     parser.add_argument('--save_dir', type=str, default='./data')
+    parser.add_argument('--resume_step', '-rs', type=int, default=None)
     return parser.parse_args()
 
 def set_random_seed(seed):
@@ -423,17 +598,27 @@ def main(args):
     args = parse_arguments()
     print_green('Program starts at: \033[92m %s \033[0m' % datetime.now().strftime("%Y-%m-%d %H:%M"))
     set_random_seed(args.seed)
+
     env = gym.make(args.env)
+    if len(env.observation_space.shape) >= 3:
+        env = WrapAtariEnv(env=env, noop_max=30, frameskip=args.frame_skip, framestack=args.frame_stack)
+    if not args.test:
+        dele = input("Do you wanna recreate ckpt and log folders? (y/n)")
+        if dele == 'y':
+            if os.path.exists(args.save_dir):
+                shutil.rmtree(args.save_dir)
 
-    dele = input("Do you wanna recreate ckpt and log folders? (y/n)")
-    if dele == 'y':
-        if os.path.exists(args.save_dir):
-            shutil.rmtree(args.save_dir)
-
-    env = wrap_env(env, args)
-    q_net = DQNetworkFC
+        env = wrap_env(env, args)
+    if len(env.observation_space.shape) >= 3:
+        q_net = DQNetworkConv
+    else:
+        q_net = DQNetworkFC
     agent = DQNAgent(env=env, qnet=q_net, args=args)
-    agent.train()
+    if args.test:
+        agent.rollout(episodes=100, render=False)
+    else:
+        agent.train()
+    agent.env.close()
     print_green('Program ends at: \033[92m %s \033[0m' % datetime.now().strftime("%Y-%m-%d %H:%M"))
 
 
