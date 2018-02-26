@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch import optim
 from tensorboardX import SummaryWriter
 import numpy as np
-from PIL import Image
+import cv2
 from collections import deque
 import os, sys, copy, argparse, shutil
 from datetime import datetime
@@ -95,39 +95,66 @@ class DQNetworkConv(nn.Module):
             out = self.fc5(out)
         return out
 
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.memory = []
+        self.capacity = capacity
+        self.cur_pos = 0
+
+    def __len__(self):
+        return len(self.memory)
+
+    def append(self, ob0, action, reward, ob1, terminal1):
+        data = (ob0, action, reward, ob1, terminal1)
+        if len(self.memory) < self.capacity:
+            self.memory.append(data)
+        else:
+            self.memory[self.cur_pos] = data
+        self.cur_pos = (self.cur_pos + 1) % self.capacity
+
+    def sample(self, batch_size):
+        batch_inds = np.random.randint(len(self.memory), size=batch_size)
+        ob0s, actions, rewards, ob1s, terminal1s = [], [], [], [], []
+        for idx in batch_inds:
+            data = self.memory[idx]
+            ob0, action, reward, ob1, terminal1 = data
+            ob0s.append(ob0)
+            actions.append(action)
+            rewards.append(reward)
+            ob1s.append(ob1)
+            terminal1s.append(terminal1)
+
+        result = {
+            'obs0': np.array(ob0s),
+            'obs1': np.array(ob1s),
+            'rewards': np.array(rewards, dtype=np.float32).reshape(-1, 1),
+            'actions': np.array(actions).reshape(-1, 1),
+            'terminals1': np.array(terminal1s, dtype=np.float32).reshape(-1, 1),
+        }
+        return result
+
 
 class CyclicBuffer:
     def __init__(self, shape, dtype='float32'):
         self.cur_pos = 0
         self.cur_len = 0
         self.buffer_size = shape[0]
-        self.data_split = True if len(shape) > 3 else False # split data into several smaller array to avoid memory error
-        if self.data_split:
-            self.data = [np.zeros((shape[0],) + (shape[2:])) for i in range(shape[1])]
+        if len(shape) > 3:
+            self.data = np.zeros(shape, dtype=np.uint8)
         else:
-            self.data = np.zeros(shape).astype(dtype)
+            self.data = np.zeros(shape, dtype=dtype)
 
     def __len__(self):
         return self.cur_len
 
     def get_batch(self, ids):
-        if self.data_split:
-            data = []
-            for i in range(len(self.data)):
-                data.append(self.data[i][ids])
-            data = np.stack(data, axis=1)
-        else:
-            data = self.data[ids]
+        data = self.data[ids]
         return data
 
     def append(self, v):
         if self.cur_len < self.buffer_size:
             self.cur_len += 1
-        if self.data_split:
-            for i in range(len(self.data)):
-                self.data[i][self.cur_pos] = v[i, :, :]
-        else:
-            self.data[self.cur_pos] = v
+        self.data[self.cur_pos] = v
         self.cur_pos = (self.cur_pos + 1) % self.buffer_size
 
 
@@ -172,6 +199,8 @@ class DQNAgent:
     def __init__(self, env, qnet, args):
         self.env = env
         self.ob_space = env.observation_space
+        self.is_atari = True if len(env.observation_space.shape) >= 3 else False
+
         self.ac_space = env.action_space
         self.ac_dim = self.ac_space.n
         self.epsilon = self.initial_epsilon = args.initial_epsilon
@@ -216,8 +245,9 @@ class DQNAgent:
                                      dueling=self.enable_dueling_net)
             self.hard_update(self.target_q_net, self.q_net)
 
-            self.memory = ReplayMemory(capacity=int(args.memory),
-                                       observation_shape=self.ob_space.shape)
+            # self.memory = ReplayMemory(capacity=int(args.memory),
+            #                            observation_shape=self.ob_space.shape)
+            self.memory = ReplayBuffer(capacity=int(args.memory))
 
             self.q_net_loss = nn.SmoothL1Loss()
             self.target_q_net.cuda()
@@ -274,6 +304,7 @@ class DQNAgent:
                 log_info['episode_reward'] = np.mean([rew for rew in episode_rewards])
                 log_info['episode_step'] = np.mean([sp for sp in episode_steps])
                 log_info['epsilon'] = self.epsilon
+                log_info['memory_size'] = len(self.memory)
                 self.nice_log(log_info, step=t)
 
             if len(self.memory) > self.warmup_mem and episode_num % self.save_interval == 0 and episode_num_inc:
@@ -367,6 +398,9 @@ class DQNAgent:
             batch_data[key] = torch.from_numpy(value)
         obs0 = Variable(batch_data['obs0']).float().cuda()
         vol_obs1 = Variable(batch_data['obs1'], volatile=True).float().cuda()
+        if self.is_atari:
+            obs0 = obs0 / 255.0
+            vol_obs1 = vol_obs1 / 255.0
         rewards = Variable(batch_data['rewards']).float().cuda()
         actions = Variable(batch_data['actions']).long().cuda().view(-1, 1)
         terminals = Variable(batch_data['terminals1']).float().cuda()
@@ -502,17 +536,23 @@ class WrapAtariEnv(gym.Wrapper):
         self.framestack = framestack
         self.frames = deque(maxlen=self.framestack)
 
-        self.observation_space = gym.spaces.Box(low=0, high=1.0,
-                                                shape=(self.framestack, 84, 84))
+        self.observation_space = gym.spaces.Box(low=0, high=255,
+                                                shape=(self.framestack, 84, 84),
+                                                dtype=np.uint8)
         self._max_episode_steps = env._max_episode_steps
+        self.lives = 0
+        self.real_done = True
 
     def reset(self):
-        self.env.reset()
-        noops = np.random.randint(1, self.noop_max + 1)
-        for i in range(noops):
-            ob, rew, done, info = self.env.step(0) # execute the action 0
-            if done:
-                ob = self.reset()
+        if self.real_done:
+            self.env.reset()
+            noops = np.random.randint(1, self.noop_max + 1)
+            for i in range(noops):
+                ob, rew, done, info = self.env.step(0) # execute the action 0
+                if done:
+                    ob = self.reset()
+        else:
+            ob, _, _, _ = self.env.step(0) # execute no-op to advance from lost life state
         ob = self.process_ob(ob)
         for i in range(self.framestack):
             self.frames.append(ob)
@@ -524,6 +564,11 @@ class WrapAtariEnv(gym.Wrapper):
             ob, rew, done, info = self.env.step(action)
             total_rew += rew
         total_rew = np.sign(total_rew)  # convert reward to {+1, -1, 0}
+        self.real_done = done
+        lives = self.env.unwrapped.ale.lives()  # how many lives left
+        if lives < self.lives and lives > 0: # if agent lost a life
+            done = True
+        self.lives = lives
         ob = self.process_ob(ob)
         self.frames.append(ob)
         return self.get_ob(), total_rew, done, info
@@ -533,10 +578,9 @@ class WrapAtariEnv(gym.Wrapper):
         return ob
 
     def process_ob(self, ob):
-        im = Image.fromarray(ob)
-        im = im.convert('L')
-        im = im.resize((84, 84), Image.LANCZOS)
-        ob = np.array(im).astype(np.float32) / 255.0
+        im = cv2.cvtColor(ob, cv2.COLOR_RGB2GRAY)
+        ob = cv2.resize(im, (84, 84), interpolation=cv2.INTER_AREA)
+        # ob = np.array(im).astype(np.float32) / 255.0
         return ob
 
 
