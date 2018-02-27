@@ -52,7 +52,7 @@ class DQNetworkFC(nn.Module):
             self.fc2 = nn.Linear(hid_dim, self.act_dim)
 
     def forward(self, st):
-        out = F.relu(self.fc1(st))
+        out = F.selu(self.fc1(st))
         if self.dueling:
             val = self.v_fc(out).expand(out.size(0), self.act_dim)
             adv = self.adv_fc(out)
@@ -325,7 +325,8 @@ class DQNAgent:
 
     def get_q_values(self, ob):
         ob = Variable(torch.from_numpy(np.expand_dims(ob, axis=0)), volatile=True).float().cuda()
-        ob /= 255.0 # I divide the ob by 255 here instead of in WrapAtariEnv to save memory used by replay buffer
+        if self.is_atari:
+            ob /= 255.0 # I divide the ob by 255 here instead of in WrapAtariEnv to save memory used by replay buffer
         q_val = self.q_net(ob)
         return q_val
 
@@ -498,7 +499,7 @@ class DQNAgent:
         stats_str = {}
         for key, val in stats.items():
             if isinstance(val, float):
-                str_val = '{:<10.4f}'.format(val)
+                str_val = '{:<10.7f}'.format(val)
             else:
                 str_val = str(val)
             stats_str[truncate_string(key)] = truncate_string(str_val)
@@ -604,7 +605,7 @@ def parse_arguments():
     parser.add_argument('--train_freq', help='train_frequency', type=int, default=1)
     parser.add_argument('--max_episode', help='maximum episode', type=int, default=None)
     parser.add_argument('--max_timesteps', help='maximum timestep', type=int, default=100000000)
-    parser.add_argument('--lr', dest='lr', type=float, default=0.0001)
+    parser.add_argument('--lr', dest='lr', type=float, default=0.00025)
     parser.add_argument('--lr_decay', action='store_true', help='decay learning rate')
     parser.add_argument('--gamma', help='discount_factor', type=float, default=0.99)
     parser.add_argument('--warmup_mem', type=int, help='warmup memory size', default=1000)
@@ -667,7 +668,7 @@ def main(args):
         q_net = DQNetworkFC
     agent = DQNAgent(env=env, qnet=q_net, args=args)
     if args.test:
-        agent.rollout(episodes=100, render=False)
+        agent.rollout(episodes=100, render=True)
     else:
         agent.train()
     agent.env.close()
