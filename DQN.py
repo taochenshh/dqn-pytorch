@@ -113,7 +113,7 @@ class ReplayBuffer:
         self.cur_pos = (self.cur_pos + 1) % self.capacity
 
     def sample(self, batch_size):
-        batch_inds = np.random.randint(len(self.memory), size=batch_size)
+        batch_inds = np.random.choice(len(self.memory), batch_size, replace=False)
         ob0s, actions, rewards, ob1s, terminal1s = [], [], [], [], []
         for idx in batch_inds:
             data = self.memory[idx]
@@ -139,16 +139,13 @@ class CyclicBuffer:
         self.cur_pos = 0
         self.cur_len = 0
         self.buffer_size = shape[0]
-        if len(shape) > 3:
-            self.data = np.zeros(shape, dtype=np.uint8)
-        else:
-            self.data = np.zeros(shape, dtype=dtype)
+        self.data = [np.zeros(shape[1:], dtype=dtype) for i in range(shape[0])]
 
     def __len__(self):
         return self.cur_len
 
     def get_batch(self, ids):
-        data = self.data[ids]
+        data = np.array([self.data[idx] for idx in ids], dtype=np.float32)
         return data
 
     def append(self, v):
@@ -179,9 +176,9 @@ class ReplayMemory:
         result = {
             'obs0': obs0_batch,
             'obs1': obs1_batch,
-            'rewards': reward_batch,
-            'actions': action_batch,
-            'terminals1': terminal1_batch,
+            'rewards': reward_batch.reshape(-1, 1),
+            'actions': action_batch.reshape(-1, 1),
+            'terminals1': terminal1_batch.reshape(-1, 1),
         }
         return result
 
@@ -326,7 +323,8 @@ class DQNAgent:
         print_blue('Training done ...')
 
     def get_q_values(self, ob):
-        ob = Variable(torch.from_numpy(np.expand_dims(ob, axis=0))).float().cuda()
+        ob = Variable(torch.from_numpy(np.expand_dims(ob, axis=0)), volatile=True).float().cuda()
+        ob /= 255.0 # I divide the ob by 255 here instead of in WrapAtariEnv to save memory used by replay buffer
         q_val = self.q_net(ob)
         return q_val
 
@@ -380,7 +378,6 @@ class DQNAgent:
         self.epsilon = ori_epsilon
         self.q_net.train()
         return np.mean(rewards)
-
 
     def decay_epsilon(self, step):
         frac = min(float(step) / self.max_epsilon_decay_steps, 1.0)
@@ -629,7 +626,7 @@ def wrap_env(env, args):
         if args.max_episode is not None:
             video_save_interval = int(args.max_episode / 3)
         else:
-            video_save_interval = int(args.max_timesteps / env._max_episode_steps / 3)
+            video_save_interval = int(args.max_timesteps / float(env._max_episode_steps) / 3)
         env = Monitor(env, directory=monitor_dir,
                       video_callable=lambda episode_id: episode_id % video_save_interval == 0,
                       force=True)
