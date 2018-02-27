@@ -13,6 +13,7 @@ import cv2
 from collections import deque
 import os, sys, copy, argparse, shutil
 from datetime import datetime
+import time
 
 def print_red(skk):
     print("\033[91m {}\033[00m" .format(skk))
@@ -339,6 +340,7 @@ class DQNAgent:
                 q_val = self.get_q_values(ob)
                 act = self.greedy_policy(q_val)
                 new_ob, rew, done, _ = self.env.step(act)
+                time.sleep(0.01)
                 if render:
                     self.env.render()
                 episode_step += 1
@@ -526,7 +528,7 @@ class DQNAgent:
         sys.stdout.flush()
 
 class WrapAtariEnv(gym.Wrapper):
-    def __init__(self, env, noop_max=30, frameskip=4, framestack=4):
+    def __init__(self, env, noop_max=30, frameskip=4, framestack=4, test=False):
         gym.Wrapper.__init__(self, env)
         self.noop_max = noop_max
         self.frameskip = frameskip
@@ -539,17 +541,26 @@ class WrapAtariEnv(gym.Wrapper):
         self._max_episode_steps = env._max_episode_steps
         self.lives = 0
         self.real_done = True
+        self.test = test
 
     def reset(self):
-        if self.real_done:
+        if not self.test:
+            if self.real_done:
+                self.env.reset()
+                noops = np.random.randint(1, self.noop_max + 1)
+                for i in range(noops):
+                    ob, rew, done, info = self.env.step(0) # execute the action 0
+                    if done:
+                        ob = self.reset()
+            else:
+                ob, _, _, _ = self.env.step(0) # execute no-op to advance from lost life state
+        else:
             self.env.reset()
             noops = np.random.randint(1, self.noop_max + 1)
             for i in range(noops):
-                ob, rew, done, info = self.env.step(0) # execute the action 0
+                ob, rew, done, info = self.env.step(0)  # execute the action 0
                 if done:
                     ob = self.reset()
-        else:
-            ob, _, _, _ = self.env.step(0) # execute no-op to advance from lost life state
         ob = self.process_ob(ob)
         for i in range(self.framestack):
             self.frames.append(ob)
@@ -560,12 +571,13 @@ class WrapAtariEnv(gym.Wrapper):
         for i in range(self.frameskip):
             ob, rew, done, info = self.env.step(action)
             total_rew += rew
-        total_rew = np.sign(total_rew)  # convert reward to {+1, -1, 0}
-        self.real_done = done
-        lives = self.env.unwrapped.ale.lives()  # how many lives left
-        if lives < self.lives and lives > 0: # if agent lost a life
-            done = True
-        self.lives = lives
+        if not self.test:
+            total_rew = np.sign(total_rew)  # convert reward to {+1, -1, 0}
+            self.real_done = done
+            lives = self.env.unwrapped.ale.lives()  # how many lives left
+            if lives < self.lives and lives > 0: # if agent lost a life
+                done = True
+            self.lives = lives
         ob = self.process_ob(ob)
         self.frames.append(ob)
         return self.get_ob(), total_rew, done, info
@@ -641,7 +653,7 @@ def main(args):
 
     env = gym.make(args.env)
     if len(env.observation_space.shape) >= 3:
-        env = WrapAtariEnv(env=env, noop_max=30, frameskip=args.frame_skip, framestack=args.frame_stack)
+        env = WrapAtariEnv(env=env, noop_max=30, frameskip=args.frame_skip, framestack=args.frame_stack, test=args.test)
     if not args.test:
         dele = input("Do you wanna recreate ckpt and log folders? (y/n)")
         if dele == 'y':
