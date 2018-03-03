@@ -52,7 +52,7 @@ class DQNetworkFC(nn.Module):
             self.fc2 = nn.Linear(hid_dim, self.act_dim)
 
     def forward(self, st):
-        out = F.selu(self.fc1(st))
+        out = F.relu(self.fc1(st))
         if self.dueling:
             val = self.v_fc(out).expand(out.size(0), self.act_dim)
             adv = self.adv_fc(out)
