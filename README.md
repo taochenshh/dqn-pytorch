@@ -2,6 +2,7 @@
 
 ## How to run
 Note: These are just toy hyperparameters that have not been well tuned.
+
 Cartpole:
 ```
 python main.py --env=CartPole-v0 --max_timesteps=1000000 --memory=50000 --batch_size=32 --gamma=0.99 --hard_update_freq=1 --save_dir=./data_cartpole_er
