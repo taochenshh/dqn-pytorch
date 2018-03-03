@@ -632,19 +632,26 @@ def set_random_seed(seed):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
 
-def wrap_env(env, args):
-    monitor_dir = os.path.join(args.save_dir, 'monitor')
+def wrap_env(env, args, train=True):
+    suffix = 'train' if train else 'test'
+    monitor_dir = os.path.join(args.save_dir, 'monitor_%s' % suffix)
     os.makedirs(monitor_dir, exist_ok=True)
-    if args.render:
-        if args.max_episode is not None:
-            video_save_interval = int(args.max_episode / 3)
-        else:
-            video_save_interval = int(args.max_timesteps / float(env._max_episode_steps) / 3)
+    if not train:
+        video_save_interval = 1
         env = Monitor(env, directory=monitor_dir,
                       video_callable=lambda episode_id: episode_id % video_save_interval == 0,
                       force=True)
     else:
-        env = Monitor(env, directory=monitor_dir, video_callable=False, force=True)
+        if args.render:
+            if args.max_episode is not None:
+                video_save_interval = int(args.max_episode / 3)
+            else:
+                video_save_interval = int(args.max_timesteps / float(env._max_episode_steps) / 3)
+            env = Monitor(env, directory=monitor_dir,
+                          video_callable=lambda episode_id: episode_id % video_save_interval == 0,
+                          force=True)
+        else:
+            env = Monitor(env, directory=monitor_dir, video_callable=False, force=True)
     return env
 
 def main(args):
@@ -661,14 +668,14 @@ def main(args):
             if os.path.exists(args.save_dir):
                 shutil.rmtree(args.save_dir)
 
-        env = wrap_env(env, args)
+    env = wrap_env(env, args, train=not args.test)
     if len(env.observation_space.shape) >= 3:
         q_net = DQNetworkConv
     else:
         q_net = DQNetworkFC
     agent = DQNAgent(env=env, qnet=q_net, args=args)
     if args.test:
-        agent.rollout(episodes=100, render=True)
+        agent.rollout(episodes=100, render=args.render)
     else:
         agent.train()
     agent.env.close()
