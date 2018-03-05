@@ -96,6 +96,7 @@ class DQNetworkConv(nn.Module):
             out = self.fc5(out)
         return out
 
+# Method 1 to implement replay buffer
 class ReplayBuffer:
     def __init__(self, capacity):
         self.memory = []
@@ -134,7 +135,7 @@ class ReplayBuffer:
         }
         return result
 
-
+# Method 2 to implement replay buffer, this method may suffer from cpu memory issue
 class CyclicBuffer:
     def __init__(self, shape, dtype='float32'):
         self.cur_pos = 0
@@ -247,6 +248,7 @@ class DQNAgent:
             #                            observation_shape=self.ob_space.shape)
             self.memory = ReplayBuffer(capacity=int(args.memory))
 
+            # Use huber loss instead of mse
             self.q_net_loss = nn.SmoothL1Loss()
             self.target_q_net.cuda()
             self.q_net_loss.cuda()
@@ -266,11 +268,16 @@ class DQNAgent:
 
         ob = self.env.reset()
         for t in range(self.max_timesteps):
+            # linearly decay epsilon
             self.decay_epsilon(t)
+            # get Q values for current observation
+            # and select actions based on epsilon greedy policy
             q_val = self.get_q_values(ob)
             act = self.epsilon_greedy_policy(q_val)
+            # execute the action
             new_ob, rew, done, _ = self.env.step(act)
             episode_step += 1
+            # add the experience to replay buffer
             self.memory.append(ob, act, rew, new_ob, done)
             episode_reward += rew
             if done:
@@ -284,14 +291,18 @@ class DQNAgent:
             else:
                 ob = new_ob
 
+            # train the network only if there are enough elements in replay buffer
             if len(self.memory) > self.warmup_mem:
                 if t % self.train_freq == 0:
                     loss = self.train_q_net()
                     net_loss.append(loss)
                     if self.lr_decay:
                         self.scheduler.step()
+                # update the target network with soft or hard update
+                # this function checks if the target network should be updated first
                 self.update_target_network(t)
 
+            # log the info in terminal and tensorboard
             if episode_num % self.log_interval == 0 and episode_num_inc:
                 log_info = {}
                 log_info['steps'] = t
@@ -305,6 +316,7 @@ class DQNAgent:
                 log_info['memory_size'] = len(self.memory)
                 self.nice_log(log_info, step=t)
 
+            # save model checkpoint and perform evaulation
             if len(self.memory) > self.warmup_mem and episode_num % self.save_interval == 0 and episode_num_inc:
                 log_info = {}
                 eval_reward = self.eval_q_net()
@@ -331,7 +343,10 @@ class DQNAgent:
         return q_val
 
     def rollout(self, episodes, render=False):
+        # rollout "episodes" times and return the mean and std of total rewards
         self.q_net.eval()
+        ori_epsilon = self.epsilon
+        self.epsilon = 0.01
         rewards = []
         ob = self.env.reset()
         for ep in range(episodes):
@@ -340,8 +355,9 @@ class DQNAgent:
             while True:
                 q_val = self.get_q_values(ob)
                 act = self.greedy_policy(q_val)
+                # act = self.epsilon_greedy_policy(q_val)
                 new_ob, rew, done, _ = self.env.step(act)
-                time.sleep(0.01)
+                # time.sleep(0.01)
                 if render:
                     self.env.render()
                 episode_step += 1
@@ -351,6 +367,7 @@ class DQNAgent:
                     ob = self.env.reset()
                     rewards.append(reward)
                     break
+        self.epsilon = ori_epsilon
         self.q_net.train()
         reward_mean = np.mean(rewards)
         reward_std = np.std(rewards)
@@ -359,6 +376,7 @@ class DQNAgent:
 
 
     def eval_q_net(self):
+        # evaluate the algorithm during training, set epsilon=0.05
         self.q_net.eval()
         ori_epsilon = self.epsilon
         self.epsilon = 0.05
@@ -383,6 +401,7 @@ class DQNAgent:
         return np.mean(rewards)
 
     def decay_epsilon(self, step):
+        # linearly decay epsilon
         frac = min(float(step) / self.max_epsilon_decay_steps, 1.0)
         self.epsilon = self.initial_epsilon + frac * (self.final_epsilon - self.initial_epsilon)
 
@@ -393,6 +412,7 @@ class DQNAgent:
             self.hard_update(self.target_q_net, self.q_net)
 
     def train_q_net(self):
+        # sample a batch_size data
         batch_data = self.memory.sample(batch_size=self.batch_size)
         for key, value in batch_data.items():
             batch_data[key] = torch.from_numpy(value)
@@ -405,9 +425,12 @@ class DQNAgent:
         actions = Variable(batch_data['actions']).long().cuda().view(-1, 1)
         terminals = Variable(batch_data['terminals1']).float().cuda()
 
+        # calculate Q(s(t),a(t))
         q_vals = self.q_net(obs0)
         action_q_vals = torch.gather(q_vals, 1, actions)
 
+        # calculate max[Q(s(t+1), a(t+1))] from target q network
+        # a(t+1) can be from target q network or q network
         target_net_q_vals = self.target_q_net(vol_obs1)
         if self.enable_double_q:
             cur_net_q_vals = self.q_net(vol_obs1)
@@ -417,6 +440,7 @@ class DQNAgent:
             target_action_q_vals, _ = torch.max(target_net_q_vals, 1)
         target_action_q_vals.volatile = False
         target_action_q_vals = target_action_q_vals.view(-1, 1)
+        # calculate the "ground truth" value for Q(s(t),a(t))
         q_label = rewards + self.gamma * target_action_q_vals * (1 - terminals)
 
         self.q_net.zero_grad()
@@ -448,6 +472,7 @@ class DQNAgent:
             self.summary_writer.add_histogram(name, param.clone().cpu().data.numpy(), step)
 
     def load_model(self, step=None):
+        # load the saved model
         if step is None:
             ckpt_file = os.path.join(self.model_dir, 'model_best.pth')
         else:
@@ -546,6 +571,7 @@ class WrapAtariEnv(gym.Wrapper):
 
     def reset(self):
         if not self.test:
+            # only reset on end of episode
             if self.real_done:
                 self.env.reset()
                 noops = np.random.randint(1, self.noop_max + 1)
@@ -563,6 +589,7 @@ class WrapAtariEnv(gym.Wrapper):
                 if done:
                     ob = self.reset()
         ob = self.process_ob(ob)
+        # stack frames
         for i in range(self.framestack):
             self.frames.append(ob)
         return self.get_ob()
@@ -588,6 +615,7 @@ class WrapAtariEnv(gym.Wrapper):
         return ob
 
     def process_ob(self, ob):
+        # convert RGB image to Graysacle image and resize
         im = cv2.cvtColor(ob, cv2.COLOR_RGB2GRAY)
         ob = cv2.resize(im, (84, 84), interpolation=cv2.INTER_AREA)
         # ob = np.array(im).astype(np.float32) / 255.0
@@ -621,7 +649,7 @@ def parse_arguments():
     parser.add_argument('--dueling_net', '-dn', action='store_true', help='enabling dueling network')
     parser.add_argument('--test', action='store_true', help='test the trained model')
     parser.add_argument('--tau', type=float, default=0.01, help='tau for soft target network update')
-    parser.add_argument('--hard_update_freq', '-huf', type=int, default=500, help='hard target network update frequency')
+    parser.add_argument('--hard_update_freq', '-huf', type=int, default=2000, help='hard target network update frequency')
     parser.add_argument('--save_dir', type=str, default='./data')
     parser.add_argument('--resume_step', '-rs', type=int, default=None)
     return parser.parse_args()
@@ -637,7 +665,7 @@ def wrap_env(env, args, train=True):
     monitor_dir = os.path.join(args.save_dir, 'monitor_%s' % suffix)
     os.makedirs(monitor_dir, exist_ok=True)
     if not train:
-        video_save_interval = 1
+        video_save_interval = 10
         env = Monitor(env, directory=monitor_dir,
                       video_callable=lambda episode_id: episode_id % video_save_interval == 0,
                       force=True)
