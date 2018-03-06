@@ -52,6 +52,10 @@ class DQNetworkFC(nn.Module):
             self.fc2 = nn.Linear(hid_dim, self.act_dim)
 
     def forward(self, st):
+        ## linear case
+        # out = self.fc1(st)
+
+        ## nonlinear case
         out = F.relu(self.fc1(st))
         if self.dueling:
             val = self.v_fc(out).expand(out.size(0), self.act_dim)
@@ -354,8 +358,8 @@ class DQNAgent:
             episode_step = 0
             while True:
                 q_val = self.get_q_values(ob)
-                act = self.greedy_policy(q_val)
-                # act = self.epsilon_greedy_policy(q_val)
+                # act = self.greedy_policy(q_val)
+                act = self.epsilon_greedy_policy(q_val)
                 new_ob, rew, done, _ = self.env.step(act)
                 # time.sleep(0.01)
                 if render:
