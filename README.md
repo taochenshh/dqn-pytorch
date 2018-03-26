@@ -1,5 +1,7 @@
 # dqn-pytorch
 
+This is a pytorch implementation of DQN, Double DQN and Dueling DQN. The code has been tested on MountainCar, CartPole, and SpaceInvader. 
+
 ## How to run
 
 Note that we used the same code structure for both linear network and DQN. The only difference lies in the class named as DQNetworkFC. Comment out the other one first to run linear net or DQN.
