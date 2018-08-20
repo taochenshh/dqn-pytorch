@@ -236,9 +236,10 @@ class DQNAgent:
         self.q_net = qnet(in_channels=self.ob_space.shape[0],
                           act_space=self.ac_space,
                           dueling=self.enable_dueling_net)
+        self.q_net.cuda()
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=self.lr)
         self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.998, last_epoch=-1)
-        self.q_net.cuda()
+        
 
         if args.test:
             self.load_model(step=args.resume_step)
