@@ -94,7 +94,7 @@ class DQNetworkConv(nn.Module):
             adv = F.relu(self.adv_fc4(out))
             val = self.v_fc5(val)
             adv = self.adv_fc5(adv)
-            out = val + adv - adv.mean(1).unsqueeze(1).expand(out.size(0), self.act_dim)
+            out = val.expand_as(adv) + adv - adv.mean(-1, keepdim=True).expand_as(adv)
         else:
             out = F.relu(self.fc4(out))
             out = self.fc5(out)
