@@ -46,8 +46,8 @@ class DQNetworkFC(nn.Module):
         self.dueling = dueling
         self.fc1 = nn.Linear(in_channels, hid_dim)
         if self.dueling:
-            self.v_fc = nn.Linear(hid_dim, self.act_dim)
-            self.adv_fc = nn.Linear(hid_dim, 1)
+            self.adv_fc = nn.Linear(hid_dim, self.act_dim)
+            self.v_fc = nn.Linear(hid_dim, 1)
         else:
             self.fc2 = nn.Linear(hid_dim, self.act_dim)
 
@@ -60,7 +60,7 @@ class DQNetworkFC(nn.Module):
         if self.dueling:
             val = self.v_fc(out).expand(out.size(0), self.act_dim)
             adv = self.adv_fc(out)
-            out = val + adv - adv.mean(1).unsqueeze(1).expand(out.size(0), self.act_dim)
+            out = val.expand_as(adv) + adv - adv.mean(-1, keepdim=True).expand_as(adv)
         else:
             out = self.fc2(out)
         return out
