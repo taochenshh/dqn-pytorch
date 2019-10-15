@@ -280,13 +280,12 @@ class DQNAgent:
             q_val = self.get_q_values(ob)
             act = self.epsilon_greedy_policy(q_val)
             # execute the action
-            new_ob, rew, done, info = self.env.step(act)
+            new_ob, rew, done, _ = self.env.step(act)
             episode_step += 1
             # add the experience to replay buffer
             self.memory.append(ob, act, rew, new_ob, done)
             episode_reward += rew
-            reach_time_limit = info.get('TimeLimit.truncated', False)
-            if done and not reach_time_limit:
+            if done:
                 ob = self.env.reset()
                 episode_rewards.append(episode_reward)
                 episode_steps.append(episode_step)
@@ -362,15 +361,14 @@ class DQNAgent:
                 q_val = self.get_q_values(ob)
                 # act = self.greedy_policy(q_val)
                 act = self.epsilon_greedy_policy(q_val)
-                new_ob, rew, done, info = self.env.step(act)
+                new_ob, rew, done, _ = self.env.step(act)
                 # time.sleep(0.01)
                 if render:
                     self.env.render()
                 episode_step += 1
                 reward += rew
                 ob = new_ob
-                reach_time_limit = info.get('TimeLimit.truncated', False)
-                if done and not reach_time_limit:
+                if done:
                     ob = self.env.reset()
                     rewards.append(reward)
                     break
@@ -395,12 +393,11 @@ class DQNAgent:
             while True:
                 q_val = self.get_q_values(ob)
                 act = self.epsilon_greedy_policy(q_val)
-                new_ob, rew, done, info = self.env.step(act)
+                new_ob, rew, done, _ = self.env.step(act)
                 episode_step += 1
                 reward += rew
                 ob = new_ob
-                reach_time_limit = info.get('TimeLimit.truncated', False)
-                if done and not reach_time_limit:
+                if done:
                     ob = self.env.reset()
                     rewards.append(reward)
                     break
