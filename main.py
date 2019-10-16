@@ -280,10 +280,11 @@ class DQNAgent:
             q_val = self.get_q_values(ob)
             act = self.epsilon_greedy_policy(q_val)
             # execute the action
-            new_ob, rew, done, _ = self.env.step(act)
+            new_ob, rew, done, info = self.env.step(act)
             episode_step += 1
             # add the experience to replay buffer
-            self.memory.append(ob, act, rew, new_ob, done)
+            self.memory.append(ob, act, rew, new_ob, 
+                               done and not info.get('TimeLimit.truncated', False))
             episode_reward += rew
             if done:
                 ob = self.env.reset()
